@@ -90,6 +90,15 @@ class CodexAppServerTextTurnSpikeTests(unittest.TestCase):
         self.assertNotIn("prefix", redacted["clientUserMessageId"])
         self.assertEqual(redacted["input"][0]["text"], "[redacted]")
 
+    def test_redacted_thread_list_includes_index_without_raw_id(self):
+        redacted = spike.redact_threads([{"id": "thread-1", "name": "private"}])
+
+        self.assertEqual(redacted[0]["index"], 0)
+        self.assertEqual(redacted[0]["idFingerprint"], spike.stable_fingerprint("thread-1"))
+        self.assertNotIn("id", redacted[0])
+        self.assertNotIn("idPrefix", redacted[0])
+        self.assertNotIn("name", redacted[0])
+
 
 if __name__ == "__main__":
     unittest.main()

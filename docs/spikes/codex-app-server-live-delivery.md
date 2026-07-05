@@ -100,6 +100,22 @@ Observed result:
     "path": "/Users/justin/workspace/onpaper/.onpaper-spike/thread-selection.json",
     "threadCount": 2
   },
+  "threads": [
+    {
+      "index": 0,
+      "idFingerprint": "...",
+      "hasName": true,
+      "hasPreview": true,
+      "hasCwd": true
+    },
+    {
+      "index": 1,
+      "idFingerprint": "...",
+      "hasName": true,
+      "hasPreview": true,
+      "hasCwd": true
+    }
+  ],
   "threadFieldKeys": [
     "agentNickname",
     "agentRole",
@@ -126,7 +142,7 @@ Observed result:
 }
 ```
 
-The selection file is intentionally local and ignored by git. It contains only index, raw id, id fingerprint, and timestamps. It does not include thread title, preview, cwd, path, or message content.
+The redacted stdout gives enough information to choose an index/fingerprint pair without printing raw ids. The selection file is intentionally local and ignored by git. It contains only index, raw id, id fingerprint, and timestamps. It does not include thread title, preview, cwd, path, or message content.
 
 Turn status inspection, redacted and without items:
 

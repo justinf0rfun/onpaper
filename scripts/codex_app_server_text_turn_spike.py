@@ -176,8 +176,8 @@ def stable_fingerprint(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
-def redact_thread(thread: dict[str, Any]) -> dict[str, Any]:
-    return {
+def redact_thread(thread: dict[str, Any], index: int | None = None) -> dict[str, Any]:
+    redacted = {
         "idFingerprint": stable_fingerprint(thread.get("id")),
         "status": thread.get("status"),
         "source": thread.get("source"),
@@ -190,6 +190,13 @@ def redact_thread(thread: dict[str, Any]) -> dict[str, Any]:
         "hasCwd": bool(thread.get("cwd")),
         "turnCount": len(thread.get("turns") or []),
     }
+    if index is not None:
+        redacted["index"] = index
+    return redacted
+
+
+def redact_threads(threads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [redact_thread(thread, index) for index, thread in enumerate(threads)]
 
 
 def redact_turn(turn: dict[str, Any]) -> dict[str, Any]:
@@ -429,7 +436,7 @@ def command_list(args: argparse.Namespace) -> int:
         "threadCount": len(threads),
         "nextCursorPresent": bool(response["result"].get("nextCursor")),
         "threadFieldKeys": sorted(threads[0].keys()) if threads else [],
-        "threads": [redact_thread(thread) for thread in threads],
+        "threads": redact_threads(threads),
         "notifications": [item.get("method") for item in notifications],
         "appServerStderrLineCount": client.stderr_line_count,
     }
