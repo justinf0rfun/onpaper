@@ -381,6 +381,71 @@ def delivery_state_from_response(response: dict[str, Any]) -> tuple[str, str | N
     return "requestAccepted", turn_id
 
 
+def make_delivery_attempt(
+    packet_id: str,
+    attempt_id: str,
+    thread_id: str,
+    client_user_message_id: str,
+) -> dict[str, Any]:
+    now = time.time()
+    return {
+        "id": attempt_id,
+        "packetId": packet_id,
+        "destination": "codexAppServer",
+        "targetId": thread_id,
+        "clientUserMessageId": client_user_message_id,
+        "status": "queued",
+        "startedAt": now,
+        "updatedAt": now,
+        "completedAt": None,
+        "remoteTurnId": None,
+        "errorCode": None,
+        "errorMessage": None,
+        "rawErrorJSON": None,
+    }
+
+
+def update_attempt_status(
+    attempt: dict[str, Any],
+    status: str,
+    *,
+    turn_id: str | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    raw_error: Any = None,
+) -> None:
+    attempt["status"] = status
+    attempt["updatedAt"] = time.time()
+    if status in {"completed", "failed"}:
+        attempt["completedAt"] = attempt["updatedAt"]
+    if turn_id:
+        attempt["remoteTurnId"] = turn_id
+    if error_code:
+        attempt["errorCode"] = error_code
+    if error_message:
+        attempt["errorMessage"] = error_message
+    if raw_error is not None:
+        attempt["rawErrorJSON"] = json.dumps(redact_json(raw_error), sort_keys=True)
+
+
+def redact_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": attempt["id"],
+        "packetIdFingerprint": stable_fingerprint(attempt.get("packetId")),
+        "destination": attempt["destination"],
+        "targetIdFingerprint": stable_fingerprint(attempt.get("targetId")),
+        "clientUserMessageIdFingerprint": stable_fingerprint(attempt.get("clientUserMessageId")),
+        "status": attempt["status"],
+        "startedAt": attempt["startedAt"],
+        "updatedAt": attempt["updatedAt"],
+        "completedAt": attempt["completedAt"],
+        "remoteTurnIdFingerprint": stable_fingerprint(attempt.get("remoteTurnId")),
+        "errorCode": attempt["errorCode"],
+        "errorMessage": attempt["errorMessage"],
+        "rawErrorJSON": attempt["rawErrorJSON"],
+    }
+
+
 def command_send(args: argparse.Namespace) -> int:
     if not args.live:
         print("Refusing live send: pass --live with --thread-id to call turn/start.", file=sys.stderr)
@@ -390,6 +455,9 @@ def command_send(args: argparse.Namespace) -> int:
         return 2
     if args.select_from_cwd and not args.cwd:
         print("Refusing live send: --select-from-cwd requires --cwd.", file=sys.stderr)
+        return 2
+    if args.select_from_cwd and args.confirm_select_index != args.select_index:
+        print("Refusing live send: --select-from-cwd requires --confirm-select-index to match --select-index.", file=sys.stderr)
         return 2
     if not args.message:
         print("Refusing live send: --message is required.", file=sys.stderr)
@@ -477,6 +545,172 @@ def command_send(args: argparse.Namespace) -> int:
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if final_state in {"turnStarted", "completed"} else 1
+
+
+def command_packet_delivery(args: argparse.Namespace) -> int:
+    if not args.message:
+        print("Refusing packet delivery: --message is required.", file=sys.stderr)
+        return 2
+    if args.live and not args.thread_id:
+        print("Refusing live packet delivery: --thread-id is required.", file=sys.stderr)
+        return 2
+    if args.live and args.confirm_thread_id != args.thread_id:
+        print("Refusing live packet delivery: --confirm-thread-id must exactly match --thread-id.", file=sys.stderr)
+        return 2
+
+    thread_id = args.thread_id or "<existing-thread-id>"
+    attempt_id = args.attempt_id or f"attempt-{int(time.time())}"
+    client_user_message_id = args.client_user_message_id or f"onpaper:{args.packet_id}:{attempt_id}"
+    request_params: dict[str, Any] = {
+        "threadId": thread_id,
+        "clientUserMessageId": client_user_message_id,
+        "input": [{"type": "text", "text": args.message}],
+    }
+    if args.cwd:
+        request_params["cwd"] = str(Path(args.cwd).expanduser().resolve())
+    if args.read_only:
+        request_params["sandboxPolicy"] = {"type": "readOnly", "networkAccess": False}
+        request_params["approvalPolicy"] = "never"
+
+    attempt = make_delivery_attempt(args.packet_id, attempt_id, thread_id, client_user_message_id)
+    timeline: list[dict[str, Any]] = [{"state": "queued", "at": attempt["startedAt"]}]
+    response: dict[str, Any] | None = None
+    observed: list[dict[str, Any]] = []
+    init_result: dict[str, Any] = {}
+    app_server_stderr_line_count: int | None = None
+
+    if args.live:
+        client: JsonRpcClient | None = None
+        try:
+            client = JsonRpcClient(app_server_command(), args.timeout)
+            with client:
+                init_result = initialize(client)
+                response, notifications = client.request(
+                    "turn/start",
+                    request_params,
+                    collect_until={"turn/started", "turn/completed", "error"},
+                )
+                observed = notifications + client.collect_notifications(
+                    {"turn/started", "turn/completed", "error"},
+                    args.observe_seconds,
+                )
+                app_server_stderr_line_count = client.stderr_line_count
+        except AppServerError as error:
+            update_attempt_status(
+                attempt,
+                "failed",
+                error_code="transport",
+                error_message=str(error),
+                raw_error={"message": str(error)},
+            )
+            timeline.append({"state": "failed", "at": attempt["updatedAt"]})
+        except OSError as error:
+            update_attempt_status(
+                attempt,
+                "failed",
+                error_code="process",
+                error_message=str(error),
+                raw_error={"message": str(error)},
+            )
+            timeline.append({"state": "failed", "at": attempt["updatedAt"]})
+
+        if response is not None:
+            if "error" in response:
+                error = response["error"]
+                update_attempt_status(
+                    attempt,
+                    "failed",
+                    error_code=str(error.get("code")) if isinstance(error, dict) else None,
+                    error_message=str(error.get("message")) if isinstance(error, dict) else str(error),
+                    raw_error=error,
+                )
+                timeline.append({"state": "failed", "at": attempt["updatedAt"]})
+            else:
+                update_attempt_status(attempt, "requestAccepted")
+                timeline.append({"state": "requestAccepted", "at": attempt["updatedAt"]})
+                state, turn_id = delivery_state_from_response(response)
+                if state == "turnStarted":
+                    update_attempt_status(attempt, "turnStarted", turn_id=turn_id)
+                    timeline.append(
+                        {
+                            "state": "turnStarted",
+                            "turnIdFingerprint": stable_fingerprint(turn_id),
+                            "at": attempt["updatedAt"],
+                        }
+                    )
+                elif state == "completed":
+                    update_attempt_status(attempt, "completed", turn_id=turn_id)
+                    timeline.append(
+                        {
+                            "state": "completed",
+                            "turnIdFingerprint": stable_fingerprint(turn_id),
+                            "at": attempt["updatedAt"],
+                        }
+                    )
+
+        for notification in observed:
+            method = notification.get("method")
+            params = notification.get("params", {})
+            turn = params.get("turn", {})
+            notification_turn_id = turn.get("id")
+            if method == "turn/started":
+                update_attempt_status(attempt, "turnStarted", turn_id=notification_turn_id)
+                timeline.append(
+                    {
+                        "state": "turnStarted",
+                        "turnIdFingerprint": stable_fingerprint(notification_turn_id),
+                        "at": attempt["updatedAt"],
+                    }
+                )
+            elif method == "turn/completed":
+                completed_state = "failed" if turn.get("status") == "failed" else "completed"
+                update_attempt_status(attempt, completed_state, turn_id=notification_turn_id)
+                timeline.append(
+                    {
+                        "state": completed_state,
+                        "turnIdFingerprint": stable_fingerprint(notification_turn_id),
+                        "turnStatus": turn.get("status"),
+                        "at": attempt["updatedAt"],
+                    }
+                )
+            elif method == "error":
+                update_attempt_status(
+                    attempt,
+                    "failed",
+                    error_code=params.get("code"),
+                    error_message=params.get("message", "app-server error"),
+                    raw_error=params,
+                )
+                timeline.append({"state": "failed", "at": attempt["updatedAt"]})
+
+    result = {
+        "status": attempt["status"],
+        "method": "packet-delivery",
+        "liveTurnSent": args.live,
+        "manualThreadSelectionRequired": True,
+        "server": {
+            "userAgent": init_result.get("userAgent"),
+            "platformOs": init_result.get("platformOs"),
+            "platformFamily": init_result.get("platformFamily"),
+        } if init_result else None,
+        "packet": {
+            "idFingerprint": stable_fingerprint(args.packet_id),
+            "textByteCount": len(args.message.encode("utf-8")),
+        },
+        "attempt": redact_attempt(attempt),
+        "request": redact_json({"method": "turn/start", "params": request_params}),
+        "response": redact_json(response) if response is not None else None,
+        "observedNotificationMethods": [item.get("method") for item in observed],
+        "timeline": timeline,
+        "appServerStderrLineCount": app_server_stderr_line_count,
+        "safety": {
+            "dryRunRequiresNoLiveFlag": not args.live,
+            "liveRequiresThreadIdConfirmation": True,
+            "textRedactedFromOutput": True,
+        },
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if attempt["status"] != "failed" else 1
 
 
 def command_turns(args: argparse.Namespace) -> int:
@@ -630,6 +864,7 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--thread-id", required=False, help="Existing Codex thread id.")
     send.add_argument("--select-from-cwd", action="store_true", help="Select an existing thread from --cwd.")
     send.add_argument("--select-index", type=int, default=0, help="Zero-based index from the cwd-filtered thread list.")
+    send.add_argument("--confirm-select-index", type=int, help="Required with --select-from-cwd to confirm the chosen index.")
     send.add_argument("--message", required=False, help="Text-only spike message to send.")
     send.add_argument("--client-user-message-id", required=False)
     send.add_argument("--cwd", help="Optional cwd override. The path is redacted from output.")
@@ -637,6 +872,27 @@ def build_parser() -> argparse.ArgumentParser:
     send.add_argument("--timeout", type=float, default=30)
     send.add_argument("--observe-seconds", type=float, default=15)
     send.set_defaults(func=command_send)
+
+    packet_delivery = subparsers.add_parser(
+        "packet-delivery",
+        help="Build a DeliveryAttempt-shaped text packet delivery; live mode requires explicit thread id confirmation.",
+    )
+    packet_delivery.add_argument("--live", action="store_true", help="Actually call turn/start.")
+    packet_delivery.add_argument("--packet-id", default="issue-6-live-spike")
+    packet_delivery.add_argument("--attempt-id", required=False)
+    packet_delivery.add_argument("--thread-id", required=False, help="Existing Codex thread id. Required with --live.")
+    packet_delivery.add_argument(
+        "--confirm-thread-id",
+        required=False,
+        help="Must exactly match --thread-id with --live.",
+    )
+    packet_delivery.add_argument("--message", required=False, help="Text-only rendered packet body.")
+    packet_delivery.add_argument("--client-user-message-id", required=False)
+    packet_delivery.add_argument("--cwd", help="Optional cwd override. The path is redacted from output.")
+    packet_delivery.add_argument("--read-only", action="store_true", help="Request a read-only/no-approval turn.")
+    packet_delivery.add_argument("--timeout", type=float, default=30)
+    packet_delivery.add_argument("--observe-seconds", type=float, default=15)
+    packet_delivery.set_defaults(func=command_packet_delivery)
 
     turns = subparsers.add_parser("turns", help="Inspect recent turn statuses without item contents.")
     turns.add_argument("--thread-id", required=False, help="Existing Codex thread id.")

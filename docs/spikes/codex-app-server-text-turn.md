@@ -77,6 +77,7 @@ scripts/codex_app_server_text_turn_spike.py send \
   --select-from-cwd \
   --cwd /Users/justin/workspace/onpaper \
   --select-index 0 \
+  --confirm-select-index 0 \
   --read-only \
   --timeout 120 \
   --observe-seconds 180 \
@@ -94,6 +95,10 @@ scripts/codex_app_server_text_turn_spike.py send \
 ```
 
 Do not commit raw thread ids, thread titles, previews, auth material, or message logs.
+
+For issue #6 packet-shaped delivery, prefer `packet-delivery` over this legacy
+`send` command. `packet-delivery --live` requires a raw `--thread-id` and a
+matching `--confirm-thread-id` so an agent cannot silently auto-select a target.
 
 ## Installed Schema Findings
 
