@@ -66,11 +66,12 @@ The implementation should keep domain modules independent from OpenNook so captu
 This repository currently contains the first implementation slices:
 
 - `OnPaperCore`: testable domain/core code for explicit text-like capture, full-content `ContextAsset` persistence, and preview derivation.
+- `ContextPacket` composition: local packet drafts with ordered asset IDs, intent, goal, and deterministic previews from full asset content.
 - `OnPaperDestinations`: fake Codex delivery seams and DeliveryAttempt state mapping.
 - `OnPaperApp`: a SwiftPM executable shell that hosts a minimal onpaper surface through the local OpenNook package.
 - Codex app-server spike scripts and redacted spike docs under `scripts/` and `docs/spikes/`.
 
-Full packet composition UI, image/file capture, image delivery, and the complete send flow are not implemented yet.
+Image/file capture, image delivery, destination picking, and the complete send flow are not implemented yet.
 
 Key docs:
 
@@ -98,7 +99,7 @@ swift build --product OnPaperApp
 swift run OnPaperApp
 ```
 
-`OnPaperApp` depends on the local OpenNook checkout at `../opennook`. Running it launches the OpenNook notch shell and opens a minimal onpaper home surface. The expanded surface starts with a placeholder; pressing **Capture Clipboard** reads the current text clipboard, persists text-like content as full-content `ContextAsset` records, and renders recent captured assets from the local store. It does not deliver packets.
+`OnPaperApp` depends on the local OpenNook checkout at `../opennook`. Running it launches the OpenNook notch shell and opens a minimal onpaper home surface. The expanded surface starts with a placeholder; pressing **Capture Clipboard** reads the current text clipboard, persists text-like content as full-content `ContextAsset` records, and renders recent captured assets from the local store. The tray can select recent assets in click order, choose an intent, enter a goal, and persist/render a local `ContextPacket` preview. It does not deliver packets.
 
 Current capture persistence scope:
 
@@ -106,7 +107,9 @@ Current capture persistence scope:
 - Store: file-backed JSON under `Application Support/onpaper/ContextAssets.json`.
 - Source app metadata: best-effort `NSWorkspace.shared.frontmostApplication` name and bundle identifier.
 - Canonical content: `ContextAsset.content`; `preview` is display-only and must not be used for packet or delivery content.
-- Non-goals in this slice: Core Data, image/file assets, full packet composition, and Codex delivery.
+- Packet store: file-backed JSON under `Application Support/onpaper/ContextPackets.json`.
+- Packet preview: deterministic text generated from `ContextPacket.goal`, `ContextPacket.intent`, ordered asset IDs, and full asset content.
+- Non-goals in this slice: Core Data, image/file assets, destination picking, and Codex delivery.
 
 ## Privacy Boundary
 
