@@ -357,6 +357,73 @@ Do not commit the raw thread id, thread title, preview, message contents, token,
 
 `requestAccepted` and `turnStarted` are not collapsed into `completed`.
 
+## Live Attempt Result
+
+The user explicitly selected:
+
+```text
+index: 0
+idFingerprint: 7b04135192d8
+```
+
+The first live run used the selected thread and sent a text-only packet. The script entered notification observation after `turn/start` and had to be interrupted because the observation process did not return in the expected window. A follow-up redacted `thread/turns/list` inspect showed the selected thread had a most recent turn with:
+
+```json
+{
+  "status": "interrupted",
+  "itemCount": 0,
+  "itemsView": "notLoaded"
+}
+```
+
+The second live run used the same selected thread with `--observe-seconds 0` to capture the `turn/start` response shape directly. The app-server returned a JSON-RPC error:
+
+```json
+{
+  "status": "failed",
+  "method": "packet-delivery",
+  "liveTurnSent": true,
+  "attempt": {
+    "destination": "codexAppServer",
+    "targetIdFingerprint": "7b04135192d8",
+    "status": "failed",
+    "errorCode": "-32600",
+    "errorMessage": "thread not found: [redacted-id]",
+    "rawErrorJSON": "{\"code\": -32600, \"message\": \"thread not found: [redacted-id]\"}"
+  },
+  "request": {
+    "method": "turn/start",
+    "params": {
+      "threadId": {
+        "fingerprint": "7b04135192d8"
+      },
+      "input": [
+        {
+          "type": "text",
+          "text": "[redacted]"
+        }
+      ]
+    }
+  },
+  "response": {
+    "error": {
+      "code": -32600,
+      "message": "thread not found: [redacted-id]"
+    }
+  },
+  "timeline": [
+    {
+      "state": "queued"
+    },
+    {
+      "state": "failed"
+    }
+  ]
+}
+```
+
+This proves the live request path can create a queued `DeliveryAttempt`, attempt a text-only `turn/start`, and record an app-server failure without marking the packet delivered. It does not satisfy the successful live delivery acceptance criterion.
+
 Live notification filtering:
 
 - notifications for a different `params.threadId` are ignored
@@ -375,5 +442,6 @@ Issue #6 is partially de-risked:
 - raw thread ids can be written to an ignored local selection file for human choice without printing titles/previews/content
 - live delivery can read that ignored selection file when the user confirms the selected index and id fingerprint
 - live event mapping now filters unrelated thread and known-different-turn notifications
+- a live `turn/start` attempt against the selected index `0` failed with app-server `thread not found`, and the failed `DeliveryAttempt` preserved the error without becoming delivered
 
-Issue #6 is not fully closed by this run because no live `turn/start` was executed against a human-selected existing thread. The next step is to run the live command above with an explicitly selected thread id, then record whether the final state is `requestAccepted`, `turnStarted`, `completed`, or `failed`.
+Issue #6 is not fully closed by this run because the explicit live `turn/start` attempt failed with app-server `thread not found`. The next step is to select a different listed thread or determine why `thread/list` can return a thread that `turn/start` rejects.

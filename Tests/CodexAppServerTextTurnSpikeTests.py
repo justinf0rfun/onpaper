@@ -77,6 +77,14 @@ class CodexAppServerTextTurnSpikeTests(unittest.TestCase):
 
         self.assertFalse(spike.notification_matches_target(notification, "thread-1", "turn-1"))
 
+    def test_notification_filter_rejects_non_lifecycle_notification(self):
+        notification = {
+            "method": "remoteControl/status/changed",
+            "params": {},
+        }
+
+        self.assertFalse(spike.notification_matches_target(notification, "thread-1", None))
+
     def test_redaction_omits_identifier_prefixes(self):
         redacted = spike.redact_json(
             {
@@ -89,6 +97,15 @@ class CodexAppServerTextTurnSpikeTests(unittest.TestCase):
         self.assertNotIn("prefix", redacted["threadId"])
         self.assertNotIn("prefix", redacted["clientUserMessageId"])
         self.assertEqual(redacted["input"][0]["text"], "[redacted]")
+
+    def test_redaction_replaces_uuid_inside_error_message(self):
+        redacted = spike.redact_json(
+            {
+                "message": "thread not found: 11111111-2222-3333-4444-555555555555",
+            }
+        )
+
+        self.assertEqual(redacted["message"], "thread not found: [redacted-id]")
 
     def test_redacted_thread_list_includes_index_without_raw_id(self):
         redacted = spike.redact_threads([{"id": "thread-1", "name": "private"}])

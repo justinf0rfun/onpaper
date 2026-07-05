@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +30,11 @@ STATUS_EVENTS = {
     "completed",
     "failed",
 }
+LIFECYCLE_NOTIFICATION_METHODS = {"turn/started", "turn/completed", "error"}
 REDACTED = "[redacted]"
+UUID_PATTERN = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
 
 
 class AppServerError(Exception):
@@ -176,6 +181,10 @@ def stable_fingerprint(value: str | None) -> str | None:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
+def redact_string(value: str) -> str:
+    return UUID_PATTERN.sub("[redacted-id]", value)
+
+
 def redact_thread(thread: dict[str, Any], index: int | None = None) -> dict[str, Any]:
     redacted = {
         "idFingerprint": stable_fingerprint(thread.get("id")),
@@ -228,6 +237,8 @@ def redact_json(value: Any) -> Any:
         return result
     if isinstance(value, list):
         return [redact_json(item) for item in value]
+    if isinstance(value, str):
+        return redact_string(value)
     return value
 
 
@@ -297,6 +308,9 @@ def notification_matches_target(
     thread_id: str | None,
     turn_id: str | None,
 ) -> bool:
+    if notification.get("method") not in LIFECYCLE_NOTIFICATION_METHODS:
+        return False
+
     params = notification.get("params", {})
     notification_thread_id = params.get("threadId")
     if thread_id and notification_thread_id and notification_thread_id != thread_id:
@@ -507,7 +521,7 @@ def update_attempt_status(
     if error_code:
         attempt["errorCode"] = error_code
     if error_message:
-        attempt["errorMessage"] = error_message
+        attempt["errorMessage"] = redact_string(error_message)
     if raw_error is not None:
         attempt["rawErrorJSON"] = json.dumps(redact_json(raw_error), sort_keys=True)
 
@@ -581,10 +595,12 @@ def command_send(args: argparse.Namespace) -> int:
         elif state == "failed":
             timeline.append({"state": "failed", "at": time.time()})
 
-        observed = notifications + client.collect_notifications(
-            {"turn/started", "turn/completed", "error"},
-            args.observe_seconds,
-        )
+        observed = notifications
+        if "error" not in response and args.observe_seconds > 0:
+            observed += client.collect_notifications(
+                LIFECYCLE_NOTIFICATION_METHODS,
+                args.observe_seconds,
+            )
 
     for notification in observed:
         if not notification_matches_target(notification, thread_id, turn_id):
@@ -710,10 +726,12 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
                     request_params,
                     collect_until={"turn/started", "turn/completed", "error"},
                 )
-                observed = notifications + client.collect_notifications(
-                    {"turn/started", "turn/completed", "error"},
-                    args.observe_seconds,
-                )
+                observed = notifications
+                if "error" not in response and args.observe_seconds > 0:
+                    observed += client.collect_notifications(
+                        LIFECYCLE_NOTIFICATION_METHODS,
+                        args.observe_seconds,
+                    )
                 app_server_stderr_line_count = client.stderr_line_count
         except AppServerError as error:
             update_attempt_status(
