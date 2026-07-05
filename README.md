@@ -63,7 +63,14 @@ The implementation should keep domain modules independent from OpenNook so captu
 
 ## Current Status
 
-This repository currently contains product and technical planning docs. Implementation has not started.
+This repository currently contains the first implementation slices:
+
+- `OnPaperCore`: testable domain/core code for the current in-memory capture preview.
+- `OnPaperDestinations`: fake Codex delivery seams and DeliveryAttempt state mapping.
+- `OnPaperApp`: a SwiftPM executable shell that hosts a minimal onpaper surface through the local OpenNook package.
+- Codex app-server spike scripts and redacted spike docs under `scripts/` and `docs/spikes/`.
+
+Persistence, full packet composition UI, image delivery, and the complete send flow are not implemented yet.
 
 Key docs:
 
@@ -82,6 +89,16 @@ Expected baseline:
 - Core Data backed by SQLite for metadata.
 - Application Support sidecar files for original images, thumbnails, and future snapshots.
 - Fake Codex app-server client tests before live app-server delivery.
+
+Current local development commands:
+
+```bash
+swift test
+swift build --product OnPaperApp
+swift run OnPaperApp
+```
+
+`OnPaperApp` depends on the local OpenNook checkout at `../opennook`. Running it launches the OpenNook notch shell and opens a minimal onpaper home surface. The expanded surface starts with a placeholder; pressing **Capture Clipboard** reads the current text clipboard into memory only and renders a derived preview. It does not persist assets or deliver packets.
 
 ## Privacy Boundary
 
