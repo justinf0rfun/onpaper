@@ -227,6 +227,45 @@ def redact_json(value: Any) -> Any:
     return value
 
 
+def write_thread_selection_file(threads: list[dict[str, Any]], output_path: str) -> dict[str, Any]:
+    path = Path(output_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    selections = [
+        {
+            "index": index,
+            "id": thread.get("id"),
+            "idFingerprint": stable_fingerprint(thread.get("id")),
+            "createdAt": thread.get("createdAt"),
+            "updatedAt": thread.get("updatedAt"),
+            "recencyAt": thread.get("recencyAt"),
+        }
+        for index, thread in enumerate(threads)
+    ]
+    path.write_text(json.dumps({"threads": selections}, indent=2, sort_keys=True) + "\n")
+    return {
+        "path": str(path),
+        "threadCount": len(selections),
+        "containsRawThreadIds": True,
+    }
+
+
+def notification_matches_target(
+    notification: dict[str, Any],
+    thread_id: str | None,
+    turn_id: str | None,
+) -> bool:
+    params = notification.get("params", {})
+    notification_thread_id = params.get("threadId")
+    if thread_id and notification_thread_id and notification_thread_id != thread_id:
+        return False
+
+    notification_turn_id = params.get("turn", {}).get("id")
+    if turn_id and notification_turn_id and notification_turn_id != turn_id:
+        return False
+
+    return True
+
+
 def select_thread_from_cwd(
     client: JsonRpcClient,
     cwd: str,
@@ -358,6 +397,8 @@ def command_list(args: argparse.Namespace) -> int:
         "notifications": [item.get("method") for item in notifications],
         "appServerStderrLineCount": client.stderr_line_count,
     }
+    if args.selection_out:
+        result["selectionFile"] = write_thread_selection_file(threads, args.selection_out)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -503,10 +544,13 @@ def command_send(args: argparse.Namespace) -> int:
         )
 
     for notification in observed:
+        if not notification_matches_target(notification, thread_id, turn_id):
+            continue
         method = notification.get("method")
         turn = notification.get("params", {}).get("turn", {})
         notification_turn_id = turn.get("id")
         if method == "turn/started":
+            turn_id = turn_id or notification_turn_id
             timeline.append(
                 {
                     "state": "turnStarted",
@@ -515,6 +559,7 @@ def command_send(args: argparse.Namespace) -> int:
                 }
             )
         elif method == "turn/completed":
+            turn_id = turn_id or notification_turn_id
             completed_state = "failed" if turn.get("status") == "failed" else "completed"
             timeline.append(
                 {
@@ -528,6 +573,11 @@ def command_send(args: argparse.Namespace) -> int:
             timeline.append({"state": "failed", "at": time.time()})
 
     final_state = next((item["state"] for item in reversed(timeline) if item["state"] in STATUS_EVENTS), "failed")
+    filtered_observed = [
+        item
+        for item in observed
+        if notification_matches_target(item, thread_id, turn_id)
+    ]
     result = {
         "status": final_state,
         "method": "turn/start",
@@ -539,7 +589,7 @@ def command_send(args: argparse.Namespace) -> int:
         "selectedThread": redact_thread(selected_thread) if selected_thread else None,
         "request": redact_json({"method": "turn/start", "params": request_params}),
         "response": redact_json(response),
-        "observedNotificationMethods": [item.get("method") for item in observed],
+        "observedNotificationMethods": [item.get("method") for item in filtered_observed],
         "timeline": timeline,
         "appServerStderrLineCount": client.stderr_line_count,
     }
@@ -649,6 +699,12 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
                     )
 
         for notification in observed:
+            if not notification_matches_target(
+                notification,
+                thread_id,
+                attempt.get("remoteTurnId"),
+            ):
+                continue
             method = notification.get("method")
             params = notification.get("params", {})
             turn = params.get("turn", {})
@@ -700,7 +756,11 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
         "attempt": redact_attempt(attempt),
         "request": redact_json({"method": "turn/start", "params": request_params}),
         "response": redact_json(response) if response is not None else None,
-        "observedNotificationMethods": [item.get("method") for item in observed],
+        "observedNotificationMethods": [
+            item.get("method")
+            for item in observed
+            if notification_matches_target(item, thread_id, attempt.get("remoteTurnId"))
+        ],
         "timeline": timeline,
         "appServerStderrLineCount": app_server_stderr_line_count,
         "safety": {
@@ -856,6 +916,10 @@ def build_parser() -> argparse.ArgumentParser:
     list_threads.add_argument("--limit", type=int, default=10)
     list_threads.add_argument("--cwd", help="Optional cwd filter. The path is not printed.")
     list_threads.add_argument("--archived", action="store_true")
+    list_threads.add_argument(
+        "--selection-out",
+        help="Optional ignored local JSON file that receives raw thread ids for human selection.",
+    )
     list_threads.add_argument("--timeout", type=float, default=20)
     list_threads.set_defaults(func=command_list)
 

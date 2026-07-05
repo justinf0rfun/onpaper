@@ -38,6 +38,8 @@ Safety behavior:
 - live mode requires `--confirm-thread-id` to exactly match `--thread-id`
 - output redacts thread ids, message text, cwd, and raw response content fields
 - thread list and turn inspection do not print thread titles, previews, message text, or item contents
+- optional `list --selection-out` writes raw thread ids only to an ignored local `.onpaper-spike/` file for human selection
+- live notification handling ignores `turn/started`, `turn/completed`, and `error` notifications for other threads or known-different turns
 
 ## Safe Checks Run
 
@@ -79,7 +81,8 @@ Real thread list, redacted:
 ```bash
 scripts/codex_app_server_text_turn_spike.py list \
   --cwd /Users/justin/workspace/onpaper \
-  --limit 5
+  --limit 5 \
+  --selection-out .onpaper-spike/thread-selection.json
 ```
 
 Observed result:
@@ -91,6 +94,11 @@ Observed result:
   "threadCount": 2,
   "nextCursorPresent": false,
   "notifications": ["remoteControl/status/changed"],
+  "selectionFile": {
+    "containsRawThreadIds": true,
+    "path": "/Users/justin/workspace/onpaper/.onpaper-spike/thread-selection.json",
+    "threadCount": 2
+  },
   "threadFieldKeys": [
     "agentNickname",
     "agentRole",
@@ -116,6 +124,8 @@ Observed result:
   ]
 }
 ```
+
+The selection file is intentionally local and ignored by git. It contains only index, raw id, id fingerprint, and timestamps. It does not include thread title, preview, cwd, path, or message content.
 
 Turn status inspection, redacted and without items:
 
@@ -272,10 +282,11 @@ Manual live send procedure:
    ```bash
    scripts/codex_app_server_text_turn_spike.py list \
      --cwd /Users/justin/workspace/onpaper \
-     --limit 5
+     --limit 5 \
+     --selection-out .onpaper-spike/thread-selection.json
    ```
 
-2. Choose the existing destination thread in Codex UI or another trusted local source.
+2. Choose the existing destination thread in Codex UI or inspect `.onpaper-spike/thread-selection.json` locally. Do not paste the raw id into docs or issue comments.
 
 3. Run live packet delivery with the raw thread id locally:
 
@@ -315,6 +326,12 @@ Do not commit the raw thread id, thread title, preview, message contents, token,
 
 `requestAccepted` and `turnStarted` are not collapsed into `completed`.
 
+Live notification filtering:
+
+- notifications for a different `params.threadId` are ignored
+- once a turn id is known, notifications for a different `params.turn.id` are ignored
+- this prevents unrelated app-server events from completing or failing the current `DeliveryAttempt`
+
 ## Current Conclusion
 
 Issue #6 is partially de-risked:
@@ -324,5 +341,7 @@ Issue #6 is partially de-risked:
 - the packet-shaped live delivery command exists and has a safe dry-run path
 - the command creates a queued `DeliveryAttempt` before any live remote call
 - live sending now requires explicit user-selected raw thread id confirmation
+- raw thread ids can be written to an ignored local selection file for human choice without printing titles/previews/content
+- live event mapping now filters unrelated thread and known-different-turn notifications
 
 Issue #6 is not fully closed by this run because no live `turn/start` was executed against a human-selected existing thread. The next step is to run the live command above with an explicitly selected thread id, then record whether the final state is `requestAccepted`, `turnStarted`, `completed`, or `failed`.
