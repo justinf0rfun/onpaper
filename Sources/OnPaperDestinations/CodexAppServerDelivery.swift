@@ -113,6 +113,8 @@ public protocol CodexAppServerClient {
 }
 
 public struct DeliveryAttempt: Equatable, Sendable {
+    public var id: String
+    public var packetId: String?
     public var destination: String
     public var targetId: String
     public var clientUserMessageId: String
@@ -126,6 +128,8 @@ public struct DeliveryAttempt: Equatable, Sendable {
     public var rawErrorJSON: String?
 
     public init(
+        id: String = UUID().uuidString,
+        packetId: String? = nil,
         destination: String = "codexAppServer",
         targetId: String,
         clientUserMessageId: String,
@@ -138,6 +142,8 @@ public struct DeliveryAttempt: Equatable, Sendable {
         errorMessage: String? = nil,
         rawErrorJSON: String? = nil
     ) {
+        self.id = id
+        self.packetId = packetId
         self.destination = destination
         self.targetId = targetId
         self.clientUserMessageId = clientUserMessageId
@@ -154,6 +160,10 @@ public struct DeliveryAttempt: Equatable, Sendable {
 
 public struct CodexDeliveryStateMachine: Sendable {
     public private(set) var attempt: DeliveryAttempt
+
+    public init(attempt: DeliveryAttempt) {
+        self.attempt = attempt
+    }
 
     public init(targetId: String, clientUserMessageId: String, now: Date = Date()) {
         self.attempt = DeliveryAttempt(

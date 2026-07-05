@@ -217,6 +217,46 @@ The fake adapter seam is ready for the next real adapter implementation step:
 - accepted-without-completion remains pending instead of becoming delivered.
 - raw error details have a place on `DeliveryAttempt`.
 
+## Issue #5 Follow-Up
+
+Issue #5 adds the in-memory fake delivery closure on top of the lifecycle seam:
+
+```text
+ContextPacket
+  -> RenderedPacket text
+  -> selected fake Codex thread
+  -> queued DeliveryAttempt in InMemoryDeliveryAttemptRepository
+  -> fake CodexAppServerClient.startTurn
+  -> event stream updates attempt
+  -> latest attempt derives packet status
+```
+
+The added repository deliberately stays in memory. It is not Core Data and not the final persistence layer.
+
+`PacketDeliveryStatus` is derived from the latest attempt:
+
+- no attempts -> `draft`
+- `queued`, `requestAccepted`, or `turnStarted` -> `pending`
+- `completed` -> `delivered`
+- `failed` -> `failed`
+
+The issue #5 tests prove:
+
+- a queued `DeliveryAttempt` exists before fake remote delivery starts
+- success reaches `completed` and derives `delivered`
+- JSON-RPC/app-server failure records raw error details and derives `failed`
+- request accepted without completion remains `pending`, not delivered
+- turn started without completion remains `pending`, not delivered
+- retry/follow-up attempts append history and do not overwrite a prior failure
+
+Still left for issue #6:
+
+- real Codex JSON-RPC transport
+- live existing-thread target selection from app-server
+- live `turn/start` request/response mapping
+- user-visible concise transport error presentation
+- completion observation through a stable long-lived app-server lifecycle
+
 Daemon/proxy is not currently usable on this machine because the Codex installation is Homebrew CLI based, while `codex app-server daemon start` expects the standalone installer-managed path. The next live lifecycle validation should either:
 
 1. install the standalone Codex app-server layout required by `daemon start`, then rerun `daemon-proxy`, or
