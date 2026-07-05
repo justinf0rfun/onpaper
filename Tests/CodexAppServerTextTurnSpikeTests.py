@@ -107,6 +107,21 @@ class CodexAppServerTextTurnSpikeTests(unittest.TestCase):
 
         self.assertEqual(redacted["message"], "thread not found: [redacted-id]")
 
+    def test_redaction_hides_resume_path_fields(self):
+        redacted = spike.redact_json(
+            {
+                "instructionSources": ["/Users/example/AGENTS.md"],
+                "originUrl": "git@example.com:private/repo.git",
+                "runtimeWorkspaceRoots": ["/Users/example/workspace/repo"],
+                "writableRoots": ["/Users/example/workspace/repo/tmp"],
+            }
+        )
+
+        self.assertEqual(redacted["instructionSources"], "[redacted]")
+        self.assertEqual(redacted["originUrl"], "[redacted]")
+        self.assertEqual(redacted["runtimeWorkspaceRoots"], "[redacted]")
+        self.assertEqual(redacted["writableRoots"], "[redacted]")
+
     def test_redacted_thread_list_includes_index_without_raw_id(self):
         redacted = spike.redact_threads([{"id": "thread-1", "name": "private"}])
 

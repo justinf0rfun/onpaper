@@ -424,6 +424,146 @@ The second live run used the same selected thread with `--observe-seconds 0` to 
 
 This proves the live request path can create a queued `DeliveryAttempt`, attempt a text-only `turn/start`, and record an app-server failure without marking the packet delivered. It does not satisfy the successful live delivery acceptance criterion.
 
+## Resume-Before-Start Finding
+
+Safe investigation showed the missing step was `thread/resume`.
+
+The selected thread can be listed and inspected from persisted app-server history, but direct `turn/start` rejected it with `thread not found`. Calling `thread/resume` first, with `excludeTurns: true`, successfully loaded the selected thread without loading message contents:
+
+```json
+{
+  "status": "completed",
+  "method": "thread/resume",
+  "liveTurnSent": false,
+  "request": {
+    "threadId": {
+      "fingerprint": "7b04135192d8"
+    },
+    "cwd": "[redacted]",
+    "excludeTurns": true
+  },
+  "thread": {
+    "idFingerprint": "7b04135192d8",
+    "status": {
+      "type": "idle"
+    },
+    "source": "vscode",
+    "threadSource": "user",
+    "turnCount": 0
+  }
+}
+```
+
+The spike script now supports:
+
+```bash
+scripts/codex_app_server_text_turn_spike.py resume \
+  --thread-selection-file .onpaper-spike/thread-selection.json \
+  --thread-selection-index <selected-index> \
+  --confirm-thread-fingerprint '<selected-idFingerprint>' \
+  --cwd /Users/justin/workspace/onpaper
+```
+
+and:
+
+```bash
+scripts/codex_app_server_text_turn_spike.py packet-delivery \
+  --live \
+  --resume-before-start \
+  --thread-selection-file .onpaper-spike/thread-selection.json \
+  --thread-selection-index <selected-index> \
+  --confirm-thread-fingerprint '<selected-idFingerprint>' \
+  --packet-id issue-6-resume-before-start-live-check \
+  --message '<safe text-only packet>' \
+  --cwd /Users/justin/workspace/onpaper \
+  --read-only \
+  --timeout 120 \
+  --observe-seconds 60
+```
+
+Live delivery with `--resume-before-start` succeeded for the human-selected thread:
+
+```json
+{
+  "status": "completed",
+  "method": "packet-delivery",
+  "liveTurnSent": true,
+  "attempt": {
+    "destination": "codexAppServer",
+    "targetIdFingerprint": "7b04135192d8",
+    "clientUserMessageIdFingerprint": "...",
+    "status": "completed",
+    "remoteTurnIdFingerprint": "bc8259521b77",
+    "errorCode": null,
+    "errorMessage": null,
+    "rawErrorJSON": null
+  },
+  "resumeResponse": {
+    "result": {
+      "thread": {
+        "id": {
+          "fingerprint": "7b04135192d8"
+        },
+        "status": {
+          "type": "idle"
+        },
+        "turns": []
+      }
+    }
+  },
+  "response": {
+    "result": {
+      "turn": {
+        "id": {
+          "fingerprint": "bc8259521b77"
+        },
+        "itemsView": "notLoaded",
+        "status": "inProgress"
+      }
+    }
+  },
+  "observedNotificationMethods": [
+    "turn/started",
+    "turn/completed"
+  ],
+  "timeline": [
+    {
+      "state": "queued"
+    },
+    {
+      "state": "requestAccepted"
+    },
+    {
+      "state": "turnStarted"
+    },
+    {
+      "state": "completed",
+      "turnStatus": "completed"
+    }
+  ]
+}
+```
+
+Follow-up `thread/turns/list` with `itemsView: notLoaded` confirmed the delivered turn status without reading content:
+
+```json
+{
+  "status": "completed",
+  "method": "thread/turns/list",
+  "selectedThread": {
+    "idFingerprint": "7b04135192d8"
+  },
+  "turns": [
+    {
+      "idFingerprint": "bc8259521b77",
+      "status": "completed",
+      "itemCount": 0,
+      "itemsView": "notLoaded"
+    }
+  ]
+}
+```
+
 Live notification filtering:
 
 - notifications for a different `params.threadId` are ignored
@@ -443,5 +583,7 @@ Issue #6 is partially de-risked:
 - live delivery can read that ignored selection file when the user confirms the selected index and id fingerprint
 - live event mapping now filters unrelated thread and known-different-turn notifications
 - a live `turn/start` attempt against the selected index `0` failed with app-server `thread not found`, and the failed `DeliveryAttempt` preserved the error without becoming delivered
+- safe `thread/resume` with `excludeTurns` loads the selected thread without message contents
+- live `packet-delivery --resume-before-start` completed successfully with `queued -> requestAccepted -> turnStarted -> completed`
 
-Issue #6 is not fully closed by this run because the explicit live `turn/start` attempt failed with app-server `thread not found`. The next step is to select a different listed thread or determine why `thread/list` can return a thread that `turn/start` rejects.
+Issue #6's transport risk is resolved for text-only delivery when the adapter resumes a selected persisted thread before starting the turn. Product UI and durable persistence remain outside this spike by explicit goal scope.

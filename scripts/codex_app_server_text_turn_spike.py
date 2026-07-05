@@ -226,7 +226,20 @@ def redact_json(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
         for key, item in value.items():
-            if key in {"text", "preview", "name", "cwd", "path", "title", "content"}:
+            if key in {
+                "text",
+                "preview",
+                "name",
+                "cwd",
+                "path",
+                "title",
+                "content",
+                "originUrl",
+                "sourcePath",
+                "instructionSources",
+                "runtimeWorkspaceRoots",
+                "writableRoots",
+            }:
                 result[key] = REDACTED
             elif key in {"threadId", "clientUserMessageId", "id", "sessionId"} and isinstance(item, str):
                 result[key] = {
@@ -301,6 +314,39 @@ def load_thread_id_from_selection_file(
         raise AppServerError("confirmed thread fingerprint does not match selected thread id")
 
     return thread_id
+
+
+def resolve_thread_id_from_args(args: argparse.Namespace) -> str:
+    uses_raw_thread_id = bool(args.thread_id)
+    uses_selection_file = bool(args.thread_selection_file)
+    if uses_raw_thread_id and uses_selection_file:
+        raise AppServerError("use either --thread-id or --thread-selection-file, not both")
+
+    if uses_raw_thread_id:
+        return args.thread_id
+
+    if uses_selection_file:
+        if args.thread_selection_index is None:
+            raise AppServerError("--thread-selection-index is required with --thread-selection-file")
+        if not args.confirm_thread_fingerprint:
+            raise AppServerError("--confirm-thread-fingerprint is required with --thread-selection-file")
+        return load_thread_id_from_selection_file(
+            args.thread_selection_file,
+            args.thread_selection_index,
+            args.confirm_thread_fingerprint,
+        )
+
+    raise AppServerError("pass --thread-id or --thread-selection-file")
+
+
+def thread_resume_params(thread_id: str, cwd: str | None) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "threadId": thread_id,
+        "excludeTurns": True,
+    }
+    if cwd:
+        params["cwd"] = str(Path(cwd).expanduser().resolve())
+    return params
 
 
 def notification_matches_target(
@@ -661,36 +707,12 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
         print("Refusing packet delivery: --message is required.", file=sys.stderr)
         return 2
 
-    uses_raw_thread_id = bool(args.thread_id)
-    uses_selection_file = bool(args.thread_selection_file)
-    if uses_raw_thread_id and uses_selection_file:
-        print("Refusing packet delivery: use either --thread-id or --thread-selection-file, not both.", file=sys.stderr)
-        return 2
-
-    if args.live and uses_raw_thread_id and args.confirm_thread_id != args.thread_id:
+    if args.live and args.thread_id and args.confirm_thread_id != args.thread_id:
         print("Refusing live packet delivery: --confirm-thread-id must exactly match --thread-id.", file=sys.stderr)
-        return 2
-    if args.live and uses_selection_file:
-        if args.thread_selection_index is None:
-            print("Refusing live packet delivery: --thread-selection-index is required with --thread-selection-file.", file=sys.stderr)
-            return 2
-        if not args.confirm_thread_fingerprint:
-            print("Refusing live packet delivery: --confirm-thread-fingerprint is required with --thread-selection-file.", file=sys.stderr)
-            return 2
-    if args.live and not uses_raw_thread_id and not uses_selection_file:
-        print("Refusing live packet delivery: pass --thread-id or --thread-selection-file.", file=sys.stderr)
         return 2
 
     try:
-        thread_id = args.thread_id or (
-            load_thread_id_from_selection_file(
-                args.thread_selection_file,
-                args.thread_selection_index,
-                args.confirm_thread_fingerprint,
-            )
-            if uses_selection_file
-            else "<existing-thread-id>"
-        )
+        thread_id = resolve_thread_id_from_args(args) if args.live or args.thread_id or args.thread_selection_file else "<existing-thread-id>"
     except AppServerError as error:
         print(f"Refusing packet delivery: {error}", file=sys.stderr)
         return 2
@@ -713,7 +735,9 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
     response: dict[str, Any] | None = None
     observed: list[dict[str, Any]] = []
     init_result: dict[str, Any] = {}
+    resume_response: dict[str, Any] | None = None
     app_server_stderr_line_count: int | None = None
+    turn_start_sent = False
 
     if args.live:
         client: JsonRpcClient | None = None
@@ -721,17 +745,24 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
             client = JsonRpcClient(app_server_command(), args.timeout)
             with client:
                 init_result = initialize(client)
-                response, notifications = client.request(
-                    "turn/start",
-                    request_params,
-                    collect_until={"turn/started", "turn/completed", "error"},
-                )
-                observed = notifications
-                if "error" not in response and args.observe_seconds > 0:
-                    observed += client.collect_notifications(
-                        LIFECYCLE_NOTIFICATION_METHODS,
-                        args.observe_seconds,
+                if args.resume_before_start:
+                    resume_response, _ = client.request(
+                        "thread/resume",
+                        thread_resume_params(thread_id, args.cwd),
                     )
+                if resume_response is None or "error" not in resume_response:
+                    turn_start_sent = True
+                    response, notifications = client.request(
+                        "turn/start",
+                        request_params,
+                        collect_until=LIFECYCLE_NOTIFICATION_METHODS,
+                    )
+                    observed.extend(notifications)
+                    if "error" not in response and args.observe_seconds > 0:
+                        observed += client.collect_notifications(
+                            LIFECYCLE_NOTIFICATION_METHODS,
+                            args.observe_seconds,
+                        )
                 app_server_stderr_line_count = client.stderr_line_count
         except AppServerError as error:
             update_attempt_status(
@@ -752,7 +783,17 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
             )
             timeline.append({"state": "failed", "at": attempt["updatedAt"]})
 
-        if response is not None:
+        if resume_response is not None and "error" in resume_response:
+            error = resume_response["error"]
+            update_attempt_status(
+                attempt,
+                "failed",
+                error_code=str(error.get("code")) if isinstance(error, dict) else None,
+                error_message=str(error.get("message")) if isinstance(error, dict) else str(error),
+                raw_error=error,
+            )
+            timeline.append({"state": "failed", "at": attempt["updatedAt"]})
+        elif response is not None:
             if "error" in response:
                 error = response["error"]
                 update_attempt_status(
@@ -830,7 +871,7 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
     result = {
         "status": attempt["status"],
         "method": "packet-delivery",
-        "liveTurnSent": args.live,
+        "liveTurnSent": turn_start_sent,
         "manualThreadSelectionRequired": True,
         "server": {
             "userAgent": init_result.get("userAgent"),
@@ -843,6 +884,7 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
         },
         "attempt": redact_attempt(attempt),
         "request": redact_json({"method": "turn/start", "params": request_params}),
+        "resumeResponse": redact_json(resume_response) if resume_response is not None else None,
         "response": redact_json(response) if response is not None else None,
         "observedNotificationMethods": [
             item.get("method")
@@ -860,6 +902,42 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
     }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0 if attempt["status"] != "failed" else 1
+
+
+def command_resume(args: argparse.Namespace) -> int:
+    if args.thread_id and args.confirm_thread_id != args.thread_id:
+        print("Refusing resume: --confirm-thread-id must exactly match --thread-id.", file=sys.stderr)
+        return 2
+
+    try:
+        thread_id = resolve_thread_id_from_args(args)
+    except AppServerError as error:
+        print(f"Refusing resume: {error}", file=sys.stderr)
+        return 2
+
+    with JsonRpcClient(app_server_command(), args.timeout) as client:
+        init_result = initialize(client)
+        params = thread_resume_params(thread_id, args.cwd)
+        response, notifications = client.request("thread/resume", params)
+
+    thread = response.get("result", {}).get("thread") if isinstance(response, dict) else None
+    result = {
+        "status": "failed" if "error" in response else "completed",
+        "method": "thread/resume",
+        "server": {
+            "userAgent": init_result.get("userAgent"),
+            "platformOs": init_result.get("platformOs"),
+            "platformFamily": init_result.get("platformFamily"),
+        },
+        "request": redact_json(params),
+        "response": redact_json(response),
+        "thread": redact_thread(thread) if isinstance(thread, dict) else None,
+        "notifications": [item.get("method") for item in notifications],
+        "appServerStderrLineCount": client.stderr_line_count,
+        "liveTurnSent": False,
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if "error" not in response else 1
 
 
 def command_turns(args: argparse.Namespace) -> int:
@@ -1059,9 +1137,41 @@ def build_parser() -> argparse.ArgumentParser:
     packet_delivery.add_argument("--client-user-message-id", required=False)
     packet_delivery.add_argument("--cwd", help="Optional cwd override. The path is redacted from output.")
     packet_delivery.add_argument("--read-only", action="store_true", help="Request a read-only/no-approval turn.")
+    packet_delivery.add_argument(
+        "--resume-before-start",
+        action="store_true",
+        help="Call thread/resume with excludeTurns before live turn/start.",
+    )
     packet_delivery.add_argument("--timeout", type=float, default=30)
     packet_delivery.add_argument("--observe-seconds", type=float, default=15)
     packet_delivery.set_defaults(func=command_packet_delivery)
+
+    resume = subparsers.add_parser("resume", help="Safely call thread/resume with excludeTurns and redacted output.")
+    resume.add_argument("--thread-id", required=False, help="Existing Codex thread id.")
+    resume.add_argument(
+        "--confirm-thread-id",
+        required=False,
+        help="Must exactly match --thread-id.",
+    )
+    resume.add_argument(
+        "--thread-selection-file",
+        required=False,
+        help="Ignored local selection JSON written by list --selection-out.",
+    )
+    resume.add_argument(
+        "--thread-selection-index",
+        type=int,
+        required=False,
+        help="Selected index from --thread-selection-file.",
+    )
+    resume.add_argument(
+        "--confirm-thread-fingerprint",
+        required=False,
+        help="Must match the selected idFingerprint from --thread-selection-file.",
+    )
+    resume.add_argument("--cwd", help="Optional cwd override. The path is redacted from output.")
+    resume.add_argument("--timeout", type=float, default=30)
+    resume.set_defaults(func=command_resume)
 
     turns = subparsers.add_parser("turns", help="Inspect recent turn statuses without item contents.")
     turns.add_argument("--thread-id", required=False, help="Existing Codex thread id.")
