@@ -117,6 +117,8 @@ class JsonRpcClient:
 
             if response is not None and not collect_until:
                 return response, notifications
+            if response is None and self.process.poll() is not None:
+                raise AppServerError("app-server process exited before response")
 
         if response is not None:
             return response, notifications
@@ -149,6 +151,10 @@ def codex_command() -> str:
 
 def app_server_command() -> list[str]:
     return [codex_command(), "app-server", "--stdio"]
+
+
+def app_server_proxy_command() -> list[str]:
+    return [codex_command(), "app-server", "proxy"]
 
 
 def initialize(client: JsonRpcClient) -> dict[str, Any]:
@@ -261,6 +267,33 @@ def method_schema_summary(schema_dir: Path) -> dict[str, Any]:
         "missingExpectedFiles": missing,
         "expectedFilesPresent": not missing,
     }
+
+
+def command_summary(command: list[str], timeout: float) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(command, text=True, capture_output=True, timeout=timeout, check=False)
+    except subprocess.TimeoutExpired:
+        return {
+            "command": " ".join(command),
+            "status": "failed",
+            "errorCategory": "timeout",
+        }
+
+    summary: dict[str, Any] = {
+        "command": " ".join(command),
+        "status": "completed" if completed.returncode == 0 else "failed",
+        "returnCode": completed.returncode,
+        "stdoutLineCount": len(completed.stdout.splitlines()),
+        "stderrLineCount": len(completed.stderr.splitlines()),
+    }
+    if completed.stdout.strip().startswith("{"):
+        try:
+            summary["stdoutJSON"] = redact_json(json.loads(completed.stdout))
+        except json.JSONDecodeError:
+            summary["stdoutJSONParseError"] = True
+    if completed.returncode != 0 and completed.stderr:
+        summary["errorCategory"] = "stderr"
+    return summary
 
 
 def command_schema(args: argparse.Namespace) -> int:
@@ -503,6 +536,61 @@ def command_turns(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_daemon_proxy(args: argparse.Namespace) -> int:
+    checks: list[dict[str, Any]] = []
+
+    if not args.skip_start:
+        checks.append(command_summary([codex_command(), "app-server", "daemon", "start"], args.command_timeout))
+
+    checks.append(command_summary([codex_command(), "app-server", "daemon", "version"], args.command_timeout))
+
+    proxy_result: dict[str, Any] = {
+        "command": " ".join(app_server_proxy_command()),
+        "operation": "initialize",
+    }
+    client: JsonRpcClient | None = None
+    try:
+        client = JsonRpcClient(app_server_proxy_command(), args.timeout)
+        with client:
+            init_result = initialize(client)
+            proxy_result.update(
+                {
+                    "status": "completed",
+                    "server": {
+                        "userAgent": init_result.get("userAgent"),
+                        "platformOs": init_result.get("platformOs"),
+                        "platformFamily": init_result.get("platformFamily"),
+                    },
+                    "appServerStderrLineCount": client.stderr_line_count,
+                }
+            )
+    except AppServerError as error:
+        proxy_result.update(
+            {
+                "status": "failed",
+                "errorCategory": "jsonRpcOrTransport",
+                "errorMessage": str(error),
+                "appServerStderrLineCount": client.stderr_line_count if client else None,
+            }
+        )
+    checks.append(proxy_result)
+
+    status = "completed" if all(check.get("status") == "completed" for check in checks) else "failed"
+    result = {
+        "status": status,
+        "method": "daemon-proxy",
+        "liveTurnSent": False,
+        "checks": checks,
+        "conclusion": (
+            "daemon/proxy accepts JSON-RPC initialize without sending a live turn"
+            if status == "completed"
+            else "daemon/proxy did not complete all safe checks"
+        ),
+    }
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0 if status == "completed" else 1
+
+
 def command_doctor(_: argparse.Namespace) -> int:
     codex = shutil.which(codex_command())
     if not codex:
@@ -558,6 +646,15 @@ def build_parser() -> argparse.ArgumentParser:
     turns.add_argument("--limit", type=int, default=5)
     turns.add_argument("--timeout", type=float, default=20)
     turns.set_defaults(func=command_turns)
+
+    daemon_proxy = subparsers.add_parser(
+        "daemon-proxy",
+        help="Start/check daemon and probe proxy initialize without sending a turn.",
+    )
+    daemon_proxy.add_argument("--skip-start", action="store_true", help="Do not run daemon start first.")
+    daemon_proxy.add_argument("--command-timeout", type=float, default=20)
+    daemon_proxy.add_argument("--timeout", type=float, default=20)
+    daemon_proxy.set_defaults(func=command_daemon_proxy)
 
     return parser
 
