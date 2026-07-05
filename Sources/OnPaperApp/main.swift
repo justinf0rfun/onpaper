@@ -176,7 +176,11 @@ private struct OnPaperHomeView: View {
         }
         .frame(maxWidth: .infinity, minHeight: 122, alignment: .leading)
         .padding(12)
-        .background(.quaternary.opacity(0.32))
+        .background(theme.subtleFill)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(theme.subtleStroke, lineWidth: 1)
+        )
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
@@ -221,7 +225,7 @@ private struct OnPaperHomeView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 18, height: 18)
-                    .background(.blue)
+                    .background(theme.accent)
                     .clipShape(Circle())
             } else {
                 Circle()
@@ -257,7 +261,11 @@ private struct OnPaperHomeView: View {
                 }
                 .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 180, alignment: .leading)
                 .padding(10)
-                .background(.quaternary.opacity(0.24))
+                .background(theme.subtleFill)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .stroke(theme.subtleStroke, lineWidth: 1)
+                )
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
         }
@@ -309,23 +317,28 @@ private struct WorkspaceSourceAppMetadataProvider: SourceAppMetadataProviding {
     }
 }
 
-private struct OnPaperCompactGlyph: View, Sendable {
-    var body: some View {
-        Image(systemName: "doc.text")
-            .font(.system(size: 11, weight: .semibold))
-            .frame(width: 24, height: 24)
-    }
-}
-
 NookApp.main {
     var configuration = NookConfiguration()
     configuration.branding = NookHostBranding(
         hostName: "onpaper",
         hostTagline: "Context packets for Codex"
     )
+    configuration.preferenceDefaults = NookPreferenceDefaults(
+        appearance: NookAppearancePreferences(
+            chromePalette: .dark,
+            surfaceStyle: .solid,
+            presentation: .auto
+        )
+    )
+    configuration.style = NookStyle(
+        topCornerRadius: 15,
+        bottomCornerRadius: 20,
+        expandedContentInsets: NookEdgeInsets(top: 0, bottom: 2, leading: 8, trailing: 8)
+    )
     configuration.expandedWidth = 460
     configuration.setHome { OnPaperHomeView() }
-    configuration.setCompactTrailing { OnPaperCompactGlyph() }
+    configuration.setCompactLeading { EmptyView() }
+    configuration.setCompactTrailing { EmptyView() }
     configuration.onReady = { coordinator in
         let environment = ProcessInfo.processInfo.environment
         if environment["OPENNOOK_SMOKE_TEST"] != "1"
