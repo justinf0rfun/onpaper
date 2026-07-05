@@ -36,9 +36,10 @@ Safety behavior:
 - live mode requires `--live`
 - live mode requires a raw `--thread-id`
 - live mode requires `--confirm-thread-id` to exactly match `--thread-id`
-- output redacts thread ids, message text, cwd, and raw response content fields
+- output redacts thread ids, message text, cwd, and raw response content fields; identifiers are represented by fingerprints only, not raw prefixes
 - thread list and turn inspection do not print thread titles, previews, message text, or item contents
 - optional `list --selection-out` writes raw thread ids only to an ignored local `.onpaper-spike/` file for human selection
+- `packet-delivery --live` can read a selected raw id from that ignored file, but only when the user supplies both `--thread-selection-index` and matching `--confirm-thread-fingerprint`
 - live notification handling ignores `turn/started`, `turn/completed`, and `error` notifications for other threads or known-different turns
 
 ## Safe Checks Run
@@ -235,11 +236,9 @@ Observed result:
     "method": "turn/start",
     "params": {
       "threadId": {
-        "prefix": "<existing-th",
         "fingerprint": "..."
       },
       "clientUserMessageId": {
-        "prefix": "onpaper:issu",
         "fingerprint": "..."
       },
       "input": [
@@ -288,7 +287,23 @@ Manual live send procedure:
 
 2. Choose the existing destination thread in Codex UI or inspect `.onpaper-spike/thread-selection.json` locally. Do not paste the raw id into docs or issue comments.
 
-3. Run live packet delivery with the raw thread id locally:
+3. Preferred: run live packet delivery through the ignored selection file. This avoids putting the raw thread id in shell history while still requiring an explicit index and fingerprint confirmation:
+
+   ```bash
+   scripts/codex_app_server_text_turn_spike.py packet-delivery \
+     --live \
+     --thread-selection-file .onpaper-spike/thread-selection.json \
+     --thread-selection-index <selected-index> \
+     --confirm-thread-fingerprint '<selected-idFingerprint>' \
+     --packet-id issue-6-live-check \
+     --message 'onpaper issue #6 live text packet delivery check. Please acknowledge receipt only.' \
+     --cwd /Users/justin/workspace/onpaper \
+     --read-only \
+     --timeout 120 \
+     --observe-seconds 180
+   ```
+
+4. Alternative: run live packet delivery with the raw thread id locally:
 
    ```bash
    scripts/codex_app_server_text_turn_spike.py packet-delivery \
@@ -303,7 +318,7 @@ Manual live send procedure:
      --observe-seconds 180
    ```
 
-4. Inspect resulting turn statuses without content:
+5. Inspect resulting turn statuses without content:
 
    ```bash
    scripts/codex_app_server_text_turn_spike.py turns \
@@ -342,6 +357,7 @@ Issue #6 is partially de-risked:
 - the command creates a queued `DeliveryAttempt` before any live remote call
 - live sending now requires explicit user-selected raw thread id confirmation
 - raw thread ids can be written to an ignored local selection file for human choice without printing titles/previews/content
+- live delivery can read that ignored selection file when the user confirms the selected index and id fingerprint
 - live event mapping now filters unrelated thread and known-different-turn notifications
 
 Issue #6 is not fully closed by this run because no live `turn/start` was executed against a human-selected existing thread. The next step is to run the live command above with an explicitly selected thread id, then record whether the final state is `requestAccepted`, `turnStarted`, `completed`, or `failed`.

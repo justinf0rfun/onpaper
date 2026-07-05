@@ -178,7 +178,6 @@ def stable_fingerprint(value: str | None) -> str | None:
 
 def redact_thread(thread: dict[str, Any]) -> dict[str, Any]:
     return {
-        "idPrefix": str(thread.get("id", ""))[:12],
         "idFingerprint": stable_fingerprint(thread.get("id")),
         "status": thread.get("status"),
         "source": thread.get("source"),
@@ -195,7 +194,6 @@ def redact_thread(thread: dict[str, Any]) -> dict[str, Any]:
 
 def redact_turn(turn: dict[str, Any]) -> dict[str, Any]:
     return {
-        "idPrefix": str(turn.get("id", ""))[:12],
         "idFingerprint": stable_fingerprint(turn.get("id")),
         "status": turn.get("status"),
         "startedAt": turn.get("startedAt"),
@@ -216,7 +214,6 @@ def redact_json(value: Any) -> Any:
                 result[key] = REDACTED
             elif key in {"threadId", "clientUserMessageId", "id", "sessionId"} and isinstance(item, str):
                 result[key] = {
-                    "prefix": item[:12],
                     "fingerprint": stable_fingerprint(item),
                 }
             else:
@@ -247,6 +244,45 @@ def write_thread_selection_file(threads: list[dict[str, Any]], output_path: str)
         "threadCount": len(selections),
         "containsRawThreadIds": True,
     }
+
+
+def load_thread_id_from_selection_file(
+    selection_file: str,
+    selection_index: int,
+    confirm_fingerprint: str,
+) -> str:
+    path = Path(selection_file).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text())
+    except OSError as error:
+        raise AppServerError(f"cannot read thread selection file: {error}") from error
+    except json.JSONDecodeError as error:
+        raise AppServerError(f"cannot parse thread selection file: {error}") from error
+
+    threads = payload.get("threads")
+    if not isinstance(threads, list):
+        raise AppServerError("thread selection file is missing a threads array")
+
+    match = next(
+        (
+            thread
+            for thread in threads
+            if isinstance(thread, dict) and thread.get("index") == selection_index
+        ),
+        None,
+    )
+    if not match:
+        raise AppServerError(f"thread selection file has no entry for index {selection_index}")
+
+    thread_id = match.get("id")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise AppServerError(f"thread selection index {selection_index} is missing a raw id")
+
+    fingerprint = stable_fingerprint(thread_id)
+    if fingerprint != confirm_fingerprint:
+        raise AppServerError("confirmed thread fingerprint does not match selected thread id")
+
+    return thread_id
 
 
 def notification_matches_target(
@@ -601,14 +637,41 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
     if not args.message:
         print("Refusing packet delivery: --message is required.", file=sys.stderr)
         return 2
-    if args.live and not args.thread_id:
-        print("Refusing live packet delivery: --thread-id is required.", file=sys.stderr)
-        return 2
-    if args.live and args.confirm_thread_id != args.thread_id:
-        print("Refusing live packet delivery: --confirm-thread-id must exactly match --thread-id.", file=sys.stderr)
+
+    uses_raw_thread_id = bool(args.thread_id)
+    uses_selection_file = bool(args.thread_selection_file)
+    if uses_raw_thread_id and uses_selection_file:
+        print("Refusing packet delivery: use either --thread-id or --thread-selection-file, not both.", file=sys.stderr)
         return 2
 
-    thread_id = args.thread_id or "<existing-thread-id>"
+    if args.live and uses_raw_thread_id and args.confirm_thread_id != args.thread_id:
+        print("Refusing live packet delivery: --confirm-thread-id must exactly match --thread-id.", file=sys.stderr)
+        return 2
+    if args.live and uses_selection_file:
+        if args.thread_selection_index is None:
+            print("Refusing live packet delivery: --thread-selection-index is required with --thread-selection-file.", file=sys.stderr)
+            return 2
+        if not args.confirm_thread_fingerprint:
+            print("Refusing live packet delivery: --confirm-thread-fingerprint is required with --thread-selection-file.", file=sys.stderr)
+            return 2
+    if args.live and not uses_raw_thread_id and not uses_selection_file:
+        print("Refusing live packet delivery: pass --thread-id or --thread-selection-file.", file=sys.stderr)
+        return 2
+
+    try:
+        thread_id = args.thread_id or (
+            load_thread_id_from_selection_file(
+                args.thread_selection_file,
+                args.thread_selection_index,
+                args.confirm_thread_fingerprint,
+            )
+            if uses_selection_file
+            else "<existing-thread-id>"
+        )
+    except AppServerError as error:
+        print(f"Refusing packet delivery: {error}", file=sys.stderr)
+        return 2
+
     attempt_id = args.attempt_id or f"attempt-{int(time.time())}"
     client_user_message_id = args.client_user_message_id or f"onpaper:{args.packet_id}:{attempt_id}"
     request_params: dict[str, Any] = {
@@ -766,6 +829,7 @@ def command_packet_delivery(args: argparse.Namespace) -> int:
         "safety": {
             "dryRunRequiresNoLiveFlag": not args.live,
             "liveRequiresThreadIdConfirmation": True,
+            "liveSupportsSelectionFileFingerprintConfirmation": True,
             "textRedactedFromOutput": True,
         },
     }
@@ -949,6 +1013,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm-thread-id",
         required=False,
         help="Must exactly match --thread-id with --live.",
+    )
+    packet_delivery.add_argument(
+        "--thread-selection-file",
+        required=False,
+        help="Ignored local selection JSON written by list --selection-out.",
+    )
+    packet_delivery.add_argument(
+        "--thread-selection-index",
+        type=int,
+        required=False,
+        help="Selected index from --thread-selection-file.",
+    )
+    packet_delivery.add_argument(
+        "--confirm-thread-fingerprint",
+        required=False,
+        help="Must match the selected idFingerprint from --thread-selection-file with --live.",
     )
     packet_delivery.add_argument("--message", required=False, help="Text-only rendered packet body.")
     packet_delivery.add_argument("--client-user-message-id", required=False)
